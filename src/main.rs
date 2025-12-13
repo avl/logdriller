@@ -53,7 +53,6 @@ mod trie;
 
 use crate::trie::{Trie, TrieKey};
 
-const MAX_LINES: usize = 1_000_000;
 
 const AFTER_HELP: &str = "
 Examples:
@@ -77,7 +76,12 @@ struct LogdrillerArgs {
     #[arg(long, hide = true)]
     daemon: bool,
 
+    /// Application to run, with arguments
     values: Vec<String>,
+
+    /// Maximum number of lines to capture
+    #[arg(short = 'n', long)]
+    max_lines: Option<usize>,
 }
 
 pub trait ReadSavefileExt: Read {
@@ -331,12 +335,14 @@ impl State {
             fingerprint_trie.search_fn_fast(
                 item,
                 |hit| {
-                    let tp = &trace_point_data[hit.tracepoint as usize];
+                    let tp: &TracePointData = &trace_point_data[hit.tracepoint as usize];
                     tp.matches.fetch_add(1, Ordering::Relaxed);
-                    if tp.negative  {
-                        any_negative_hit = true;
-                    } else {
-                        any_positive_hit = true;
+                    if tp.active {
+                        if tp.negative  {
+                            any_negative_hit = true;
+                        } else {
+                            any_positive_hit = true;
+                        }
                     }
                 },
                 len,
@@ -365,7 +371,7 @@ impl State {
         self.capture_fingerprint_trie = Trie::new();
         for (i, tp) in self.tracepoints.iter_mut().enumerate() {
             tp.tp.tracepoint = i as u32;
-            if tp.active {
+            {
                 Self::add_tracepoint_trie(&mut self.fingerprint_trie, tp);
                 if tp.capture {
                     Self::add_tracepoint_trie(&mut self.capture_fingerprint_trie, tp);
@@ -612,7 +618,7 @@ fn mainloop(
                     );
                     drop(last);
 
-                    if state.all_lines.len() > MAX_LINES {
+                    if state.all_lines.len() > state.max_lines {
                         let next_front_id = state.all_lines.loglines.first_id() + 1;
                         if let Some(front) = state.matching_lines.front()
                             && *front <= next_front_id {
@@ -738,6 +744,7 @@ fn capturer(
     program_lines: mpsc::SyncSender<DiverEvent>,
     string_receiver: mpsc::Receiver<StringCarrier>,
     channel: usize,
+    debug_capturer: bool
 ) -> Result<()> {
     let mut child_out = BufReader::with_capacity(1_000_000, child_out);
 
@@ -748,6 +755,9 @@ fn capturer(
         //let mut count = 0;
         line_buf.read_many_lines(&mut child_out, |raw_line| {
             {
+                if debug_capturer {
+                    println!("Captured: {}", raw_line);
+                }
                 let line: &str;
                 let temp;
                 if memchr(b'\x1b', raw_line.as_bytes()).is_none() {
@@ -780,6 +790,10 @@ fn capturer(
 
                     //}
                 }*/
+
+                if debug_capturer {
+                    return Ok(());
+                }
 
                 if string_magazine.as_ref().map(|x: &StringCarrier|x.full()).unwrap_or(true) {
                     if let Some(full_magazine) = string_magazine.take() {
@@ -1240,8 +1254,8 @@ pub mod lines {
         #[test]
         fn test_analyze() {
             let mut def = AnalyzedLogLines::default();
-            def.push("hello,world");
-            def.push("tjenare,världen");
+            def.push("hello,world", |_|true);
+            def.push("tjenare,världen", |_|true);
             def.update(ColumnDefinition {
                 col_names: vec!["1".to_string(), "2".to_string()],
                 analyzer: Box::new(|msg, out| {
@@ -1249,7 +1263,7 @@ pub mod lines {
                     for sub in msg.split(',') {
                         let prev = index;
                         index += sub.len() as u32 + 1;
-                        out.push_back(prev..index);
+                        out.push(prev..index);
                     }
                 }),
             });
@@ -1258,7 +1272,7 @@ pub mod lines {
             assert_eq!(analyzed[0].line, "hello,world");
             assert_eq!(analyzed[0].indices, &[0..6, 6..12]);
             assert_eq!(analyzed[1].line, "tjenare,världen");
-            assert_eq!(analyzed[1].indices, &[0..8, 8..14]);
+            assert_eq!(analyzed[1].indices, &[0..8, 8..17]);
         }
 
         #[test]
@@ -1367,6 +1381,8 @@ struct State {
     config: ParsingConfiguration,
     raw: bool,
     col_sizes: Vec<u16>,
+    #[savefile_ignore]
+    max_lines: usize,
 }
 
 #[derive(Default, Savefile)]
@@ -2026,7 +2042,7 @@ fn main() -> Result<()> {
     // below will be monitored for changes.
     let pathbuf = PathBuf::from(&src);
 
-    let state = savefile::load_file(LOGDRILLER_FILE, 0)
+    let mut state = savefile::load_file(LOGDRILLER_FILE, 0)
         .map(|mut state: State| {
             state.rebuild_trie();
             state.reapply_parsing_config();
@@ -2035,8 +2051,10 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_e| {
             
             //t.plain = true;
-            State::default()
+            let mut t = State::default();
+            t
         });
+    state.max_lines = args.max_lines.unwrap_or(1_000_000);
     let light_mode = state.light_mode.unwrap_or_else(|| {
         terminal_light::luma()
             .map(|luma| luma > 0.6)
@@ -2120,16 +2138,18 @@ fn main() -> Result<()> {
     let (string_tx2, string_rx2) = mpsc::sync_channel(STRING_CARRIER_COUNT);
 
     let diver_events_tx2 = diver_events_tx1.clone();
+    let debug_capturer = args.debug_capturer;
+
     if let Some(stdout) = child.stdout.take() {
-        std::thread::spawn(move || capturer(stdout, diver_events_tx2, string_rx2, 1));
+        std::thread::spawn(move || capturer(stdout, diver_events_tx2, string_rx2, 1, debug_capturer));
     }
     if let Some(stderr) = child.stderr.take() {
-        std::thread::spawn(move || capturer(stderr, diver_events_tx1, string_rx1, 0));
+        std::thread::spawn(move || capturer(stderr, diver_events_tx1, string_rx1, 0, debug_capturer));
     }
     let child = KillOnDrop(child);
 
-    let debug_capturer = args.debug_capturer;
     if debug_capturer {
+
         std::thread::sleep(std::time::Duration::from_secs(86400));
         return Ok(());
     }
@@ -2271,8 +2291,8 @@ impl ColorScheme {
     fn normalize_text_color(&self, color: Rgb) -> Rgb {
         let intensity = color.red + color.green + color.blue;
         if self.light {
-            if intensity > 1.0 {
-                let f = 1.0 / intensity;
+            if intensity > 0.7 {
+                let f = 0.7 / intensity;
                 Rgb::new(f * color.red, f * color.green, f * color.blue)
             } else {
                 color
@@ -2661,7 +2681,7 @@ fn run(
                             );
                         }
                     } else {
-                        follow = output_table_state.selected() == Some(state.all_lines.loglines.len()-1);
+                        follow = output_table_state.selected() == Some(state.all_lines.loglines.len().saturating_sub(1));
                         for (i, line) in state
                             .all_lines
                             .iter()
