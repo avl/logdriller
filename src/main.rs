@@ -509,7 +509,7 @@ impl State {
     }
 
     fn focus_current_tracepoint(&mut self, back: bool) -> Option<usize> {
-        if let Some(filter) = self.selected_filter {
+        if let Some(filter) = self.selected_filter && filter < self.tracepoints.len(){
             if self.matching_lines.is_empty() {
                 return None;
             }
@@ -518,6 +518,7 @@ impl State {
             } else {
                 self.matching_lines.len().saturating_sub(1)
             });
+            let start = start.min(self.matching_lines.len() - 1);
 
             let mut trie = Trie::new();
             Self::add_tracepoint_trie(&mut trie, &self.tracepoints[filter]);
@@ -2570,7 +2571,7 @@ fn run(
 
             let newsize = terminal.size()?;
             if (last_generation != state.generation || lastsize != newsize)
-                && newsize.width > 20
+                && newsize.width > 20 //TODO: Render placeholder
                 && newsize.height > 8
             {
                 lastsize = newsize;
@@ -3156,6 +3157,8 @@ Note! Column support requires that the underlying application output is in json 
                                 .focus_current_tracepoint(modifiers.contains(KeyModifiers::SHIFT))
                             {
                                 state.do_filter = true;
+                                state.selected_output = Some(sel);
+                                follow = false;
                                 output_table_state.select(Some(sel));
                             }
                             state.save();
