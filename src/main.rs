@@ -2395,7 +2395,11 @@ fn render_message_line_with_color(
 
     let mut char_colors = vec![Rgb::<Srgb>::new(0.0, 0.0, 0.0); mline.len()];
 
-    if byte_offset == mline.len() {
+    if mline.is_empty() {
+        return message_line;
+    }
+    
+    if !mline.is_empty() && byte_offset == mline.len() {
         message_line.push_span(Span::styled("←", {
             defstyle().fg(overflow_color).bg(bgcolor)
         }));
