@@ -15,4 +15,8 @@ Logdriller can happily be used with text files in the multi-gigabyte
 range in this mode. For files larger than maybe 10 gigabytes,
 other tools are needed.
 
+## [0.6.0] - 2026-01-29
+
+Fix soundness issue with non UTF8-files.
+
 
