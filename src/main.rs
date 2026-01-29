@@ -1061,6 +1061,26 @@ use std::collections::VecDeque;
                 last_parsed: 0,
             })
         }
+        fn index_impl_verify(&self, index: usize, verify: bool) -> &str {
+            let start = self.offsets[index];
+            let end = self
+                .offsets
+                .get(index + 1)
+                .map(|x| x)
+                .unwrap_or(&self.last_parsed);
+
+            // We take care to ensure slices are always contiguous
+            let raw_bytes = &self.mmap[start..*end];
+
+            if verify {
+                str::from_utf8(raw_bytes).unwrap();
+            }
+
+            {
+                unsafe { str::from_utf8_unchecked(raw_bytes) }
+            }
+        }
+
     }
 
 
@@ -1076,7 +1096,8 @@ use std::collections::VecDeque;
                     self.offsets.push(self.last_parsed);
                     self.last_parsed = self.datalen;
                 }
-                Some(self.index_impl(self.offsets.len()-1))
+
+                Some(self.index_impl_verify(self.offsets.len()-1, true))
             } else {
                 None
             }
@@ -1129,23 +1150,7 @@ use std::collections::VecDeque;
         }
 
         fn index_impl(&self, index: usize) -> &str {
-            let start = self.offsets[index];
-            let end = self
-                .offsets
-                .get(index + 1)
-                .map(|x| x)
-                .unwrap_or(&self.last_parsed);
-
-            // We take care to ensure slices are always contiguous
-            let raw_bytes = &self.mmap[start..*end];
-            #[cfg(debug_assertions)]
-            {
-                str::from_utf8(raw_bytes).unwrap()
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                unsafe { str::from_utf8_unchecked(raw_bytes) }
-            }
+            self.index_impl_verify(index, false)
         }
 
         fn start_id(&self) -> usize {
