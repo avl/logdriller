@@ -78,7 +78,7 @@ struct LogdrillerArgs {
     daemon: bool,
 
     /// Show the given file, instead of running an application
-    #[arg(long)]
+    #[arg(long, short = 'f')]
     file: Option<PathBuf>,
 
     /// Application to run, with arguments
