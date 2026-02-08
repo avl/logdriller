@@ -489,12 +489,16 @@ impl<T:FastLogLinesTrait> State<T> {
     }
 
     fn capture_sel(&self) -> Option<LogLineId> {
+        std::fs::write("dump.txt",
+        format!("Selected output: {:?}, matching lines: {:?}, all lines: {:?}", self.selected_output,
+            self.matching_lines.len(),
+            self.all_lines.len()
+        ));
         let was_sel: Option<LogLineId> = self.selected_output.and_then(|index: usize| {
             if self.state_config.do_filter {
                 self.matching_lines.get(index).copied()
             } else {
-                //self.all_lines.get(index).cloned()
-                Some(self.all_lines.get(index).id())
+                Some(self.all_lines.get(index)?.id())
             }
         });
         was_sel
@@ -566,6 +570,7 @@ impl<T:FastLogLinesTrait> State<T> {
                     have_hit
                 });
                 if have_hit {
+                    debug_assert!(i < 1<<50);
                     self.selected_output = Some(i);
                     return Some(i);
                 }
@@ -1024,12 +1029,12 @@ use std::collections::VecDeque;
         fn preview<'a>(&'a mut self, msg: Option<&'a str>) -> Option<(&'a str, LogLineId)>;
         fn len(&self) -> usize;
         fn first_id(&self) -> LogLineId;
-        fn get(&self, line_id: LogLineId) -> &str;
+        fn get(&self, line_id: LogLineId) -> Option<&str>;
         fn push(&mut self, msg: &str);
         fn pop(&mut self);
         fn iter(&self) -> impl Iterator<Item=(LogLineId, &str)>;
         fn iter_values(&self) -> impl Iterator<Item=&str>;
-        fn index_impl(&self, index: usize) -> &str;
+        fn index_impl(&self, index: usize) -> Option<&str>;
         fn start_id(&self) -> usize;
         
         fn maybe_grow(&mut self) -> Option<&str>;
@@ -1061,13 +1066,12 @@ use std::collections::VecDeque;
                 last_parsed: 0,
             })
         }
-        fn index_impl_verify(&self, index: usize, verify: bool) -> &str {
+        fn index_impl_verify(&self, index: usize, verify: bool) -> Option<&str> {
             let start = self.offsets[index];
             let end = self
                 .offsets
                 .get(index + 1)
-                .map(|x| x)
-                .unwrap_or(&self.last_parsed);
+                .map(|x| x)?;
 
             // We take care to ensure slices are always contiguous
             let raw_bytes = &self.mmap[start..*end];
@@ -1077,7 +1081,7 @@ use std::collections::VecDeque;
             }
 
             {
-                unsafe { str::from_utf8_unchecked(raw_bytes) }
+                Some(unsafe { str::from_utf8_unchecked(raw_bytes) })
             }
         }
 
@@ -1097,7 +1101,7 @@ use std::collections::VecDeque;
                     self.last_parsed = self.datalen;
                 }
 
-                Some(self.index_impl_verify(self.offsets.len()-1, true))
+                Some(self.index_impl_verify(self.offsets.len()-1, true).unwrap())
             } else {
                 None
             }
@@ -1116,8 +1120,8 @@ use std::collections::VecDeque;
             LogLineId(0)
         }
 
-        fn get(&self, line_id: LogLineId) -> &str {
-            &self.index_impl(line_id.0)
+        fn get(&self, line_id: LogLineId) -> Option<&str> {
+            self.index_impl(line_id.0)
         }
 
         fn push(&mut self, msg: &str) {
@@ -1149,7 +1153,7 @@ use std::collections::VecDeque;
                 })
         }
 
-        fn index_impl(&self, index: usize) -> &str {
+        fn index_impl(&self, index: usize) -> Option<&str> {
             self.index_impl_verify(index, false)
         }
 
@@ -1246,7 +1250,11 @@ impl FastLogLinesTrait for FastLogLines {
         self.offsets.len()
     }
 
-    fn index_impl(&self, index: usize) -> &str {
+    fn index_impl(&self, index: usize) -> Option<&str> {
+
+        if index >= self.offsets.len() {
+            return None;
+        }
         let start = self.offsets[index] - self.start_offset;
         let end = self
             .offsets
@@ -1257,11 +1265,11 @@ impl FastLogLinesTrait for FastLogLines {
         let raw_bytes = self.raw_data.get_range(start..end);
         #[cfg(debug_assertions)]
         {
-            str::from_utf8(raw_bytes).unwrap()
+            Some(str::from_utf8(raw_bytes).unwrap())
         }
         #[cfg(not(debug_assertions))]
         {
-            unsafe { str::from_utf8_unchecked(raw_bytes) }
+            Some(unsafe { str::from_utf8_unchecked(raw_bytes) })
         }
 
     }
@@ -1270,9 +1278,9 @@ impl FastLogLinesTrait for FastLogLines {
             LogLineId(self.start_id)
         }
 
-        fn get(&self, line_id: LogLineId) -> &str {
+        fn get(&self, line_id: LogLineId) -> Option<&str> {
             let offset = line_id.0 - self.start_id;
-            &self.index_impl(offset)
+            self.index_impl(offset)
         }
     fn push(&mut self, msg: &str) {
             let msg = truncate(msg, Self::MAX_LINE_LENGTH);
@@ -1299,10 +1307,10 @@ impl FastLogLinesTrait for FastLogLines {
         fn iter(&self) -> impl Iterator<Item = (LogLineId, &str)> {
             (0..self.len())
                 .enumerate()
-                .map(|(idx, x)| (LogLineId(self.start_id + idx), self.index_impl(x)))
+                .map(|(idx, x)| (LogLineId(self.start_id + idx), self.index_impl(x).unwrap()))
         }
         fn iter_values(&self) -> impl Iterator<Item = &str> {
-            (0..self.len()).map(|x| self.index_impl(x))
+            (0..self.len()).map(|x| self.index_impl(x).unwrap())
         }
 
     fn start_id(&self) -> usize {
@@ -1344,12 +1352,23 @@ impl FastLogLinesTrait for FastLogLines {
         fn get_range(&self, range: Range<usize>) -> &[T] {
             let start = range.start;
             let end = range.end;
+            if range.start >= range.end {
+                return &[];
+            }
             let slices = self.as_slices();
             let cut = slices.0.len();
             // Will panic if ranges aren't actually contiguous
             if start >= cut {
+                if end-cut > slices.1.len() {
+                    debug_assert!(false);
+                    return &[];
+                }
                 &slices.1[start - cut..end - cut]
             } else {
+                if end > slices.0.len() {
+                    debug_assert!(false);
+                    return &[];
+                }
                 &slices.0[start..end]
             }
         }
@@ -1392,6 +1411,10 @@ impl FastLogLinesTrait for FastLogLines {
         type Output = str;
 
         fn index(&self, index: usize) -> &Self::Output {
+            if index >= self.indices.len() {
+                debug_assert!(false);
+                return "";
+            }
             let range = self.indices[index].clone();
             if range.start == u32::MAX {
                 return "";
@@ -1471,25 +1494,26 @@ impl FastLogLinesTrait for FastLogLines {
             }
             self.offsets = std::mem::take(&mut self.temp).into();
         }
-        pub fn get<'a>(&'a self, index: usize) -> AnalyzedRow<'a> {
+        pub fn get<'a>(&'a self, index: usize) -> Option<AnalyzedRow<'a>> {
             let n = self.coldef.col_names.len();
-            AnalyzedRow {
-                line: self.loglines.index_impl(index),
+            Some(AnalyzedRow {
+                line: self.loglines.index_impl(index)?,
                 indices: self.offsets.get_range(index * n..(index + 1) * n),
                 line_id: LogLineId(self.loglines.start_id() + index),
-            }
+            })
         }
         pub fn len(&self) -> usize {
             self.loglines.len()
         }
         pub fn last<'a>(&'a self) -> AnalyzedRow<'a> {
+            debug_assert!(self.loglines.len() > 0);
             let last_index = self.loglines.len() - 1;
-            self.get(last_index)
+            self.get(last_index).unwrap()
         }
 
         pub fn get_by_id<'a>(&'a self, id: LogLineId) -> AnalyzedRow<'a> {
             let pos = self.position_of(id).unwrap();
-            self.get(pos)
+            self.get(pos).unwrap()
         }
         pub fn iter<'a>(&'a self) -> impl Iterator<Item = AnalyzedRow<'a>> {
             self.loglines.iter_values().enumerate().map(|(idx, line)| {
@@ -1561,7 +1585,7 @@ impl FastLogLinesTrait for FastLogLines {
                     l.pop();
                 }
                 for i in 0..l.len() {
-                    println!("{}: {} = {}", x, i, &l.index_impl(i));
+                    println!("{}: {} = {:?}", x, i, &l.index_impl(i));
                 }
             }
         }
@@ -1571,13 +1595,13 @@ impl FastLogLinesTrait for FastLogLines {
             let mut l = FastLogLines::default();
             l.push("hello");
             l.push("world");
-            assert_eq!(l.index_impl(0), "hello");
-            assert_eq!(l.index_impl(1), "world");
+            assert_eq!(l.index_impl(0), Some("hello"));
+            assert_eq!(l.index_impl(1), Some("world"));
             l.pop();
-            assert_eq!(l.index_impl(0), "world");
+            assert_eq!(l.index_impl(0), Some("world"));
             l.push("world2");
-            assert_eq!(l.index_impl(0), "world");
-            assert_eq!(l.index_impl(1), "world2");
+            assert_eq!(l.index_impl(0), Some("world"));
+            assert_eq!(l.index_impl(1), Some("world2"));
             l.pop();
             l.pop();
         }
@@ -1717,6 +1741,9 @@ mod simple_json {
         }
 
         fn handle_key_value(&mut self, key: Range<u32>, value: Range<u32>) -> Option<()> {
+            if key.end as usize > self.orig.len() {
+                return None;
+            }
             let key_str: &str = &self.orig[key.start as usize..key.end as usize];
 
             match &self.fields {
@@ -2658,6 +2685,10 @@ fn render_message_line_with_color(
             let col = color_style.color_by_index(tp_match.color_index);
             for (start, end) in tp_match.hits.range.iter() {
                 let end = (*end).min(char_colors.len() as u32); //TODO: Don't clamp here, it would be a bug if needed
+                if *start > end {
+                    debug_assert!(false);
+                    continue;
+                }
                 for c in &mut char_colors[*start as usize..end as usize] {
                     combine(c, col);
                 }
@@ -2677,6 +2708,10 @@ fn render_message_line_with_color(
         }
         if start < byte_offset {
             start = byte_offset;
+        }
+        if end > mline.len() {
+            debug_assert!(false);
+            continue;
         }
         message_line.push_span(Span::styled(mline[start..end].to_string(), {
             defstyle()
@@ -3595,7 +3630,7 @@ fn add_line<'a>(
 ) {
     let mut lines = Vec::with_capacity(10);
     for (col_index, col) in line.cols().enumerate() {
-        if auto_size {
+        if auto_size && col_index < col_sizes.len(){
             col_sizes[col_index] = col_sizes[col_index].max(col.chars().count() as u16);
         }
         let msgline = render_message_line_with_color(
