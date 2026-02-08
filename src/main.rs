@@ -489,11 +489,6 @@ impl<T:FastLogLinesTrait> State<T> {
     }
 
     fn capture_sel(&self) -> Option<LogLineId> {
-        std::fs::write("dump.txt",
-        format!("Selected output: {:?}, matching lines: {:?}, all lines: {:?}", self.selected_output,
-            self.matching_lines.len(),
-            self.all_lines.len()
-        ));
         let was_sel: Option<LogLineId> = self.selected_output.and_then(|index: usize| {
             if self.state_config.do_filter {
                 self.matching_lines.get(index).copied()
