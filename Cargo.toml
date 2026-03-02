@@ -2,10 +2,13 @@
 name = "logdriller"
 version = "0.7.0"
 edition = "2024"
-description = "tool to visualize application log output in the terminal"
+description = "Tool to visualize application log output in the terminal"
 license = "MIT"
 repository = "https://github.com/avl/logdiver"
 
+[[bench]]
+name = "search"
+harness = false
 
 [dependencies]
 crossterm = "0.29.0"
@@ -27,3 +30,5 @@ memmap2 = "0.9.9"
 
 [dev-dependencies]
 insta ="1.43.2"
+divan = "0.1.21"
+rand = "0.10.0"

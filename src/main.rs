@@ -53,9 +53,14 @@ use tui_textarea::TextArea;
 mod line_parser;
 mod trie;
 
-use crate::trie::{Trie, TrieKey};
+use crate::trie::{Fingerprint, MatchSequence, Trie, TrieKey};
 
 const AFTER_HELP: &str = "
+Regarding the --trace flag: Whenever a file is modified such that a line
+containing a string literal is modified; add that string as a search
+expression. If such a line has '//' added to its end, make the search
+expression active.
+
 Examples:
     logdriller path/to/some/executable
     logdriller -- path/to/some/executable --parameter-to-executable=1
@@ -77,7 +82,12 @@ struct LogdrillerArgs {
     #[arg(long, hide = true)]
     daemon: bool,
 
-    /// Show the given file, instead of running an application
+    /// Watch all files in the current directory and below and add search expressions
+    /// for added string literals.
+    #[arg(long, short = 't')]
+    trace: bool,
+
+    /// Show the given file instead of running an application
     #[arg(long, short = 'f')]
     file: Option<PathBuf>,
 
@@ -145,7 +155,7 @@ fn parse_delta(prev: &str, now: &str, path: &Arc<PathBuf>, tx: &Buffer, debug_no
                 println!("New tracepoint: {:?}", finger);
             }
             let tp = TracePointData {
-                fingerprint: Fingerprint(finger),
+                fingerprint: Fingerprint::new(finger),
                 tp,
                 active: line.trim_end().ends_with("//"),
                 capture: false,
@@ -194,66 +204,7 @@ fn fingerprint(line: &str, fingerprint: &mut Vec<TrieKey>) -> Option<()> {
     }
 }
 
-#[derive(Savefile, Default, Clone, Debug)]
-struct MatchSequence {
-    range: Vec<(u32, u32)>,
-}
 
-impl MatchSequence {
-    pub fn clear(&mut self) {
-        self.range.clear();
-    }
-    #[allow(unused)]
-    pub fn is_empty(&self) -> bool {
-        self.range.is_empty()
-    }
-    #[allow(unused)]
-    pub(crate) fn visit(&self, len: usize, mut visitor: impl FnMut(usize, usize, bool)) {
-        let mut expected_start = 0;
-        for (start, end) in &self.range {
-            if *start as usize != expected_start {
-                visitor(expected_start, *start as usize, false);
-            }
-            visitor(*start as usize, *end as usize, true);
-            expected_start = *end as usize;
-        }
-        if expected_start != len {
-            visitor(expected_start, len, false);
-        }
-    }
-}
-
-struct Restore {
-    range_count: u32,
-    end_at: u32,
-}
-impl MatchSequence {
-    pub fn add(&mut self, index: u32) {
-        if let Some(last) = self.range.last_mut()
-            && index == 0
-        {
-            last.1 += 1;
-            return;
-        }
-        if let Some(last) = self.range.last().map(|x| x.1) {
-            self.range.push((last + index, last + index + 1));
-        } else {
-            self.range.push((index, index + 1));
-        }
-    }
-    pub fn save(&mut self) -> Restore {
-        Restore {
-            range_count: self.range.len() as u32,
-            end_at: self.range.last().map(|x| x.1).unwrap_or(0),
-        }
-    }
-    pub fn restore(&mut self, restore: Restore) {
-        self.range.truncate(restore.range_count as usize);
-        if let Some(last) = self.range.last_mut() {
-            last.1 = restore.end_at;
-        }
-    }
-}
 
 fn check_matching<'a>(
     fingerprint_trie: &mut Trie<TracePoint>,
@@ -375,7 +326,7 @@ impl<T:FastLogLinesTrait> State<T> {
     }
 
     fn add_tracepoint_trie(trie: &mut Trie<TracePoint>, tp: &TracePointData) {
-        trie.push(&tp.fingerprint.0, tp.tp.clone());
+        trie.push(&tp.fingerprint, tp.tp.clone());
     }
     fn rebuild_trie(&mut self) {
         self.fingerprint_trie = Trie::new();
@@ -915,66 +866,6 @@ pub enum DiverEvent {
     ProgramOutput(StringCarrier, usize /*channel 0 or 1*/),
 }
 
-#[derive(Savefile, Clone, PartialEq)]
-pub struct Fingerprint(Vec<TrieKey>);
-
-impl Debug for Fingerprint {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Fingerprint({})", self)
-    }
-}
-impl Fingerprint {
-    pub fn parse(s: &str) -> Fingerprint {
-        let mut t = Vec::new();
-        let mut wild = true;
-
-        for c in s.as_bytes() {
-            if *c == b'*' {
-                wild = true;
-                continue;
-            }
-            if wild {
-                wild = false;
-                t.push(TrieKey::WildcardThen(*c));
-            } else {
-                t.push(TrieKey::Exact(*c));
-            }
-        }
-        if t.is_empty() && s.contains('*') {
-            t.push(TrieKey::Any);
-        }
-
-        Fingerprint(t)
-    }
-}
-
-impl Display for Fingerprint {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut output = Vec::new();
-        for key in self.0.iter() {
-            match *key {
-                TrieKey::Eof => {
-                    output.push(b'$');
-                }
-                TrieKey::Exact(b) => {
-                    output.push(b);
-                }
-                TrieKey::WildcardThen(b) => {
-                    output.push(b'*');
-                    output.push(b);
-                }
-                TrieKey::Any => {
-                    output.push(b'*');
-                }
-            }
-        }
-        if output.len() > 1 && output.starts_with("*".as_bytes()) {
-            output.remove(0);
-        }
-        let output = String::from_utf8(output).unwrap();
-        write!(f, "{output}")
-    }
-}
 
 #[derive(Savefile, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 struct ColorIndex(usize);
@@ -2375,55 +2266,57 @@ fn inner_main<T:FastLogLinesTrait>(mut state: State<T>, state_config: StateConfi
     }
 
 
-    let mut iter = 0;
 
-    loop {
-        std::thread::sleep(Duration::from_millis(20));
-        if let Ok(contents) = std::fs::read_to_string(".logdriller.port") {
-            let tcpport: u16 = contents.parse::<u16>().unwrap();
-            let port = tcpport;
-            match TcpStream::connect(format!("127.0.0.1:{port}")) {
-                Ok(mut stream) => {
-                    let path = stream.read_msg::<String>().unwrap();
-                    if path != pathbuf.as_path().display().to_string() {
-                        stream.write_msg(&"QUIT".to_string()).unwrap();
-                        continue;
-                    }
-                    stream.write_msg(&"GO".to_string()).unwrap();
-                    let diver_events_tx = diver_events_tx1.clone();
-                    std::thread::spawn(move || {
-                        loop {
-                            let tpdata = stream.read_msg::<TracePointData>().unwrap();
-
-                            diver_events_tx
-                                .send(DiverEvent::SourceChanged(tpdata))
-                                .unwrap();
+    if args.trace {
+        let mut iter = 0;
+        loop {
+            std::thread::sleep(Duration::from_millis(20));
+            if let Ok(contents) = std::fs::read_to_string(".logdriller.port") {
+                let tcpport: u16 = contents.parse::<u16>().unwrap();
+                let port = tcpport;
+                match TcpStream::connect(format!("127.0.0.1:{port}")) {
+                    Ok(mut stream) => {
+                        let path = stream.read_msg::<String>().unwrap();
+                        if path != pathbuf.as_path().display().to_string() {
+                            stream.write_msg(&"QUIT".to_string()).unwrap();
+                            continue;
                         }
-                    });
-                    break;
-                }
-                Err(error) => {
-                    if iter > 0 {
-                        eprintln!("Failed to connect to server, {}", error);
+                        stream.write_msg(&"GO".to_string()).unwrap();
+                        let diver_events_tx = diver_events_tx1.clone();
+                        std::thread::spawn(move || {
+                            loop {
+                                let tpdata = stream.read_msg::<TracePointData>().unwrap();
+
+                                diver_events_tx
+                                    .send(DiverEvent::SourceChanged(tpdata))
+                                    .unwrap();
+                            }
+                        });
+                        break;
+                    }
+                    Err(error) => {
+                        if iter > 0 {
+                            eprintln!("Failed to connect to server, {}", error);
+                        }
                     }
                 }
             }
-        }
-        if iter == 0 {
-            std::thread::sleep(Duration::from_secs(2));
-            Command::new(std::env::current_exe()?)
-                .stdin(Stdio::null())
-                .args(&[
-                    "-s".to_string(),
-                    pathbuf.as_path().display().to_string(),
-                    "--daemon".to_string(),
-                ])
-                .spawn()
-                .unwrap();
-        }
-        iter += 1;
-        if iter > 100 {
-            bail!("Failed to start background daemon");
+            if iter == 0 {
+                std::thread::sleep(Duration::from_secs(2));
+                Command::new(std::env::current_exe()?)
+                    .stdin(Stdio::null())
+                    .args(&[
+                        "-s".to_string(),
+                        pathbuf.as_path().display().to_string(),
+                        "--daemon".to_string(),
+                    ])
+                    .spawn()
+                    .unwrap();
+            }
+            iter += 1;
+            if iter > 100 {
+                bail!("Failed to start background daemon");
+            }
         }
     }
 
@@ -3097,7 +2990,7 @@ fn run<T:FastLogLinesTrait>(
                             .title("Output")
                             .highlight(Window::Output, state.state_config.active_window, &color_style)
                             .title_bottom(format!(
-                                "{} / {}, R - show raw, F - toggle filter, H - help",
+                                "{} / {}, Tab - change pane, F - toggle filter, H - help",
                                 selected_opt
                                     .map(|x| (x + 1).to_string())
                                     .unwrap_or_default(),
@@ -3441,7 +3334,6 @@ Note! Column support requires that the underlying application output is in json 
                             if let Some(sel) = state
                                 .focus_current_tracepoint(modifiers.contains(KeyModifiers::SHIFT))
                             {
-                                state.state_config.do_filter = true;
                                 state.selected_output = Some(sel);
                                 follow = false;
                                 output_table_state.select(Some(sel));

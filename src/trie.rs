@@ -1,9 +1,142 @@
-use crate::{MatchSequence, Restore};
+
 use memchr::memchr_iter;
 use savefile::prelude::Savefile;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+
+#[derive(Savefile, Clone, PartialEq)]
+pub struct Fingerprint(Vec<TrieKey>);
+
+impl Debug for Fingerprint {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fingerprint({})", self)
+    }
+}
+
+impl std::ops::Deref for Fingerprint {
+    type Target = Vec<TrieKey>;
+    fn deref(&self) -> &<Self as std::ops::Deref>::Target {
+        &self.0
+    }
+}
+impl Fingerprint {
+    pub fn new(keys: Vec<TrieKey>) -> Fingerprint {
+        Fingerprint(keys)
+    }
+    pub fn parse(s: &str) -> Fingerprint {
+        let mut t = Vec::new();
+        let mut wild = true;
+
+        for c in s.as_bytes() {
+            if *c == b'*' {
+                wild = true;
+                continue;
+            }
+            if wild {
+                wild = false;
+                t.push(TrieKey::WildcardThen(*c));
+            } else {
+                t.push(TrieKey::Exact(*c));
+            }
+        }
+        if t.is_empty() && s.contains('*') {
+            t.push(TrieKey::Any);
+        }
+
+        Fingerprint(t)
+    }
+}
+
+impl Display for Fingerprint {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut output = Vec::new();
+        for key in self.0.iter() {
+            match *key {
+                TrieKey::Eof => {
+                    output.push(b'$');
+                }
+                TrieKey::Exact(b) => {
+                    output.push(b);
+                }
+                TrieKey::WildcardThen(b) => {
+                    output.push(b'*');
+                    output.push(b);
+                }
+                TrieKey::Any => {
+                    output.push(b'*');
+                }
+            }
+        }
+        if output.len() > 1 && output.starts_with("*".as_bytes()) {
+            output.remove(0);
+        }
+        let output = String::from_utf8(output).unwrap();
+        write!(f, "{output}")
+    }
+}
+
+
+
+impl MatchSequence {
+    pub fn clear(&mut self) {
+        self.range.clear();
+    }
+    #[allow(unused)]
+    pub fn is_empty(&self) -> bool {
+        self.range.is_empty()
+    }
+    #[allow(unused)]
+    pub(crate) fn visit(&self, len: usize, mut visitor: impl FnMut(usize, usize, bool)) {
+        let mut expected_start = 0;
+        for (start, end) in &self.range {
+            if *start as usize != expected_start {
+                visitor(expected_start, *start as usize, false);
+            }
+            visitor(*start as usize, *end as usize, true);
+            expected_start = *end as usize;
+        }
+        if expected_start != len {
+            visitor(expected_start, len, false);
+        }
+    }
+}
+
+struct Restore {
+    range_count: u32,
+    end_at: u32,
+}
+impl MatchSequence {
+    pub fn add(&mut self, index: u32) {
+        if let Some(last) = self.range.last_mut()
+            && index == 0
+        {
+            last.1 += 1;
+            return;
+        }
+        if let Some(last) = self.range.last().map(|x| x.1) {
+            self.range.push((last + index, last + index + 1));
+        } else {
+            self.range.push((index, index + 1));
+        }
+    }
+    pub fn save(&mut self) -> Restore {
+        Restore {
+            range_count: self.range.len() as u32,
+            end_at: self.range.last().map(|x| x.1).unwrap_or(0),
+        }
+    }
+    pub fn restore(&mut self, restore: Restore) {
+        self.range.truncate(restore.range_count as usize);
+        if let Some(last) = self.range.last_mut() {
+            last.1 = restore.end_at;
+        }
+    }
+}
+#[derive(Savefile, Default, Clone, Debug)]
+pub struct MatchSequence {
+   pub range: Vec<(u32, u32)>,
+}
 /// This is a little trie-based search structure.
 ///
 /// Really, we should probably just use the machinery from the regex-crate.
@@ -579,8 +712,8 @@ impl<V> Trie<V> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TinyMap, Trie};
-    use crate::Fingerprint;
+
+    use super::{Fingerprint, TinyMap, Trie};
 
     fn verify_matches(needles: &[&str], haystack: &str) {
         let mut trie = Trie::new();
