@@ -1,6 +1,9 @@
 # Changelog
 
 
+## [0.8.1]
+Fix bug where the `--file` option did not work.
+
 ## [0.8.0]
 Make background process be non-default. Enable using '--trace' option.
 Also, make 'O' key not implicitly turn on filtering.
