@@ -439,6 +439,7 @@ impl<T:FastLogLinesTrait> State<T> {
         self.rebuild_matches();
     }
 
+    /// Returns the currently selected line as a stable [`LogLineId`].
     fn capture_sel(&self) -> Option<LogLineId> {
         let was_sel: Option<LogLineId> = self.selected_output.and_then(|index: usize| {
             if self.state_config.do_filter {
@@ -450,6 +451,7 @@ impl<T:FastLogLinesTrait> State<T> {
         was_sel
     }
 
+    /// Restores the selection to the given [`LogLineId`] and centres the view on it.
     fn restore_sel(
         &mut self,
         was_sel: Option<LogLineId>,
@@ -468,22 +470,29 @@ impl<T:FastLogLinesTrait> State<T> {
         }
     }
 
+    /// Moves the selection to the next (`back=false`) or previous (`back=true`) line
+    /// matching the selected filter tracepoint, wrapping around. Returns the new index,
+    /// or `None` if no filter is selected or no match exists.
     fn focus_current_tracepoint(&mut self, back: bool) -> Option<usize> {
         if let Some(filter) = self.state_config.selected_filter && filter < self.state_config.tracepoints.len(){
-            if self.matching_lines.is_empty() {
+            let total_count = if self.state_config.do_filter {
+                self.matching_lines.len()
+            } else {
+                self.all_lines.len()
+            };
+            if total_count == 0 {
                 return None;
             }
             let start = self.selected_output.unwrap_or(if back {
                 0
             } else {
-                self.matching_lines.len().saturating_sub(1)
+                total_count.saturating_sub(1)
             });
-            let start = start.min(self.matching_lines.len() - 1);
+            let start = start.min(total_count - 1);
 
             let mut trie = Trie::new();
             Self::add_tracepoint_trie(&mut trie, &self.state_config.tracepoints[filter]);
             let mut visited_count = 0;
-            let total_count = self.matching_lines.len();
             let mut cur = start;
             let mut next = || {
                 if visited_count == total_count {
@@ -502,8 +511,12 @@ impl<T:FastLogLinesTrait> State<T> {
             };
 
             while let Some(i) = next() {
-                let message_id = &self.matching_lines[i];
-                let message = self.all_lines.get_by_id(*message_id);
+                let message = if self.state_config.do_filter {
+                    let message_id = self.matching_lines[i];
+                    self.all_lines.get_by_id(message_id)
+                } else {
+                    self.all_lines.get(i).unwrap()
+                };
                 let have_hit = message.cols().any(|col| {
                     let mut have_hit = false;
                     trie.search_fn_fast(
@@ -683,6 +696,11 @@ impl ReadManyLines {
         mut f: impl FnMut(&str) -> Result<()>,
     ) -> Result<()> {
         let mut buf = read.fill_buf()?;
+        if buf.len() == 0 {
+            // EOF.
+            // It's very unlikely/impossible that EOF stops being EOF, but let's retry periodically
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
         let mut l = 0;
         let mut limit = 0;
         while let Some(index) = memchr(b'\n', buf) {
@@ -3284,7 +3302,18 @@ Note! Column support requires that the underlying application output is in json 
                                 _ => 0,
                             };
                             match state.state_config.active_window {
-                                Window::Filter => {}
+                                Window::Filter => {
+                                    let n = state.state_config.tracepoints.len();
+                                    if n > 0 {
+                                        if let Some(selected) = filter_table_state.selected() {
+                                            let new = selected.saturating_add_signed(change).min(n - 1);
+                                            filter_table_state.select(Some(new));
+                                        } else {
+                                            filter_table_state.select(Some(0));
+                                        }
+                                        state.state_config.selected_filter = filter_table_state.selected();
+                                    }
+                                }
                                 Window::Output => {
                                     if let Some(selected) = output_table_state.selected() {
                                         output_table_state
@@ -3297,7 +3326,17 @@ Note! Column support requires that the underlying application output is in json 
                             }
                         }
                         KeyCode::Home | KeyCode::End => match state.state_config.active_window {
-                            Window::Filter => {}
+                            Window::Filter => {
+                                let n = state.state_config.tracepoints.len();
+                                if n > 0 {
+                                    match code {
+                                        KeyCode::Home => filter_table_state.select(Some(0)),
+                                        KeyCode::End => filter_table_state.select(Some(n - 1)),
+                                        _ => {}
+                                    }
+                                    state.state_config.selected_filter = filter_table_state.selected();
+                                }
+                            }
                             Window::Output => {
                                 match code {
                                     KeyCode::Home => {

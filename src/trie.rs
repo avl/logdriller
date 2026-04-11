@@ -696,6 +696,8 @@ impl<V> Trie<V> {
                 hit(v);
                 hit_count += 1;
                 hit_count < max_hits
+                // TODO: Figure out why the above optimization doesn't actually work. 
+                //true
             },
             generation,
         );

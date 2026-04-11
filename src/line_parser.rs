@@ -2,6 +2,7 @@
 //! This turned out to be hard to do and is a work-in-progress.
 use memchr::memchr;
 
+/// Returns `true` if `path` looks like a `filename:lineno:` token,
 #[allow(unused)]
 fn could_be_filename(path: &str) -> bool {
     if !path.ends_with(':') {
