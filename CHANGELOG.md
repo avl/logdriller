@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.8.2]
+Fix multiple bugs:
+ * Skipping to next hit using 'O' did not work when filtering was disabled.
+ * Make pgup, pgdn, home and end work also in the filter-tab.
+ * Fix bug where logdriller consumed 200% CPU once the client app had terminated.
 
 ## [0.8.1]
 Fix bug where the `--file` option did not work.
