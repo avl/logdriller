@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0]
+New features:
+ * Solo mode. Disable all filters except one.
+ * Clearer color scheme (different color for border highlight and row highlight)
+
+Bug fixes:
+ * Fix a possible underflow bug with tiny terminal windows
+ * Position in document jumps around less when changing filters
+ * Make sure there aren't two identical filters (it's confusing, and also
+   this the second one didn't actually work because of an optimization)
+
 ## [0.8.2]
 Fix multiple bugs:
  * Skipping to next hit using 'O' did not work when filtering was disabled.
