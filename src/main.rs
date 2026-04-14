@@ -160,6 +160,7 @@ fn parse_delta(prev: &str, now: &str, path: &Arc<PathBuf>, tx: &Buffer, debug_no
                 active: line.trim_end().ends_with("//"),
                 capture: false,
                 negative: false,
+                solo: false,
                 matches: AtomicUsize::new(0),
             };
             tx.push(tp);
@@ -217,6 +218,7 @@ fn check_matching<'a>(
     let mut any_positive_hit = false;
     let mut any_negative_hit = false;
 
+    let any_solo = trace_point_data.iter().any(|tp| tp.solo);
     let len = trace_point_data.len();
     for item in row.cols() {
         fingerprint_trie.search_fn_fast(
@@ -224,7 +226,8 @@ fn check_matching<'a>(
             |hit| {
                 let tp: &TracePointData = &trace_point_data[hit.tracepoint as usize];
                 tp.matches.fetch_add(1, Ordering::Relaxed);
-                if tp.active {
+                let effective_active = if any_solo { tp.solo } else { tp.active };
+                if effective_active {
                     if tp.negative {
                         any_negative_hit = true;
                     } else {
@@ -464,6 +467,7 @@ impl<T:FastLogLinesTrait> State<T> {
     }
 
     /// Restores the selection to the given [`LogLineId`] and centres the view on it.
+    /// If the exact line is no longer visible, selects the closest visible line instead.
     fn restore_sel(
         &mut self,
         was_sel: Option<LogLineId>,
@@ -472,7 +476,28 @@ impl<T:FastLogLinesTrait> State<T> {
     ) {
         if let Some(sel) = was_sel {
             let newsel = if self.state_config.do_filter {
-                self.matching_lines.iter().position(|x| sel == *x)
+                match self.matching_lines.binary_search(&sel) {
+                    Ok(pos) => Some(pos),
+                    Err(_) if self.matching_lines.is_empty() => None,
+                    Err(insert_pos) => {
+                        // insert_pos is where sel would sit; check the neighbours
+                        let before = insert_pos.checked_sub(1);
+                        let after = (insert_pos < self.matching_lines.len()).then_some(insert_pos);
+                        match (before, after) {
+                            (None, Some(i)) => Some(i),
+                            (Some(i), None) => Some(i),
+                            (Some(bi), Some(ai)) => {
+                                let bdist = sel.abs_diff(self.matching_lines[bi]);
+                                let adist = sel.abs_diff(self.matching_lines[ai]);
+                                Some(if bdist <= adist { bi } else { ai })
+                            }
+                            // Both arms are None only when insert_pos is 0 and
+                            // matching_lines is empty, but that case is handled by
+                            // the is_empty() guard above.
+                            (None, None) => unreachable!(),
+                        }
+                    }
+                }
             } else {
                 self.all_lines.position_of(sel)
             };
@@ -908,6 +933,8 @@ pub struct TracePointData {
     capture: bool,
     negative: bool,
     matches: AtomicUsize,
+    #[savefile_versions="2.."]
+    solo: bool,
 }
 impl Clone for TracePointData {
     fn clone(&self) -> Self {
@@ -918,7 +945,7 @@ impl Clone for TracePointData {
             capture: self.capture,
             negative: self.negative,
             matches: AtomicUsize::new(self.matches.load(Ordering::Relaxed)),
-
+            solo: self.solo,
         }
     }
 }
@@ -1126,6 +1153,9 @@ use std::collections::VecDeque;
     pub struct LogLineId(usize);
     impl LogLineId {
         pub const MAX: LogLineId = LogLineId(usize::MAX);
+        pub fn abs_diff(self, other: LogLineId) -> usize {
+            self.0.abs_diff(other.0)
+        }
     }
     impl Add<usize> for LogLineId {
         type Output = LogLineId;
@@ -1910,7 +1940,7 @@ impl Ord for Debounced {
 }
 
 const LOGDRILLER_FILE: &str = ".logdriller.bin";
-const SAVEFILE_VERSION: u32 = 1;
+const SAVEFILE_VERSION: u32 = 2;
 
 fn strip_ansi_codes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -2761,6 +2791,7 @@ fn run<T:FastLogLinesTrait>(
                     Constraint::Length(7),
                     Constraint::Length(8),
                     Constraint::Length(8),
+                    Constraint::Length(5),
                     Constraint::Length(8),
                     Constraint::Percentage(100),
                 ],
@@ -2772,7 +2803,7 @@ fn run<T:FastLogLinesTrait>(
                     .highlight(Window::Filter, state.state_config.active_window, &color_style),
             )
             .header(Row::new(vec![
-                "Active", "Negative", "Capture", "Matches", "Filter",
+                "Active", "Negative", "Capture", "Solo", "Matches", "Filter",
             ]))
             .highlight_symbol(">")
             .style(color_style.default_style);
@@ -3073,6 +3104,11 @@ fn run<T:FastLogLinesTrait>(
                                 } else {
                                     " ".to_string()
                                 }),
+                                Line::raw(if tracepoint.solo {
+                                    "X".to_string()
+                                } else {
+                                    " ".to_string()
+                                }),
                                 Line::raw(tracepoint.matches.load(Ordering::Relaxed).to_string()),
                                 Line::raw(tracepoint.fingerprint.to_string()).set_style(
                                     defstyle()
@@ -3105,12 +3141,14 @@ Tab   - Switch window                r     - Raw mode (don't parse output)
 i     - Configure columns            f     - Enable/disable all filters
 n     - Toggle negative*             Home - Go to first line
 c     - Toggle capture filter**      End  - Go to last line and follow
-u     - Autosize columns             s    - Freeze (throw away further output)
-←/→   - Scroll rightmost column***
+z     - Toggle solo mode***          s    - Freeze (throw away further output)
+u     - Autosize columns
+←/→   - Scroll rightmost column****
 
 * exclude matching lines
 ** reject before buffer
-*** left/right
+*** disable all other filters
+**** left/right
 ";
                             render_help(frame, helptext, &color_style);
                             //this clears out the background
@@ -3468,6 +3506,30 @@ Note! Column support requires that the underlying application output is in json 
                             }
                         }
 
+                        KeyCode::Char('Z' | 'z')
+                            if state.state_config.active_window == Window::Filter =>
+                        {
+                            if let Some(index) = filter_table_state.selected() {
+                                let was_sel = state.capture_sel();
+                                let already_solo = state.state_config.tracepoints
+                                    .get(index)
+                                    .map_or(false, |tp| tp.solo);
+                                for (i, tp) in state.state_config.tracepoints.iter_mut().enumerate() {
+                                    tp.solo = !already_solo && i == index;
+                                }
+                                if !already_solo {
+                                    state.state_config.do_filter = true;
+                                }
+                                state.rebuild_matches();
+                                state.restore_sel(
+                                    was_sel,
+                                    &mut output_table_state,
+                                    &mut do_center,
+                                );
+                                state.save();
+                            }
+                        }
+
                         KeyCode::Char(' ') => {
                             if let Some(index) = filter_table_state.selected() {
                                 let was_sel = state.capture_sel();
@@ -3546,6 +3608,7 @@ Note! Column support requires that the underlying application output is in json 
                                 active: true,
                                 capture: false,
                                 negative: false,
+                                solo: false,
                                 matches: AtomicUsize::new(0),
                             });
 
