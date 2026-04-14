@@ -17,7 +17,7 @@ use ratatui::{
     prelude::{Color, Constraint, Direction, Layout, Line, Rect, Style, Stylize},
     style::Styled,
     text::Span,
-    widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Table, TableState},
 };
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use savefile::{
@@ -2505,8 +2505,10 @@ impl<'a> BlockExt for Block<'a> {
     fn highlight<T: Eq>(self, our_index: T, active_highlight: T, style: &ColorStyle) -> Block<'a> {
         if our_index == active_highlight {
             self.border_style(style.default_selected_style)
+                .border_type(BorderType::Thick)
         } else {
             self.border_style(style.default_style)
+                .border_type(BorderType::Plain)
         }
     }
 }
@@ -2528,6 +2530,7 @@ struct ColorScheme {
     light: bool,
     bg_color: Color,
     selected_bg_color: Color,
+    row_selected_bg_color: Color,
     base_text_color: Color,
     overflow_color: Color,
 }
@@ -2563,6 +2566,7 @@ impl ColorScheme {
                 light,
                 bg_color: Color::Rgb(255, 255, 255),
                 selected_bg_color: Color::Rgb(215, 215, 215),
+                row_selected_bg_color: Color::Rgb(115, 223, 255),
                 base_text_color: Color::Rgb(0, 0, 0),
                 overflow_color: Color::Rgb(120, 0, 255),
             }
@@ -2571,6 +2575,7 @@ impl ColorScheme {
                 light,
                 bg_color: Color::Rgb(0, 0, 0),
                 selected_bg_color: Color::Rgb(70, 70, 70),
+                row_selected_bg_color: Color::Rgb(18, 63, 135),
                 base_text_color: Color::Rgb(192, 192, 192),
                 overflow_color: Color::Rgb(192, 0, 255),
             }
@@ -2963,7 +2968,7 @@ fn run<T:FastLogLinesTrait>(
                             let line = mline;
 
                             let bgcolor = if Some(i) == selected {
-                                color_style.scheme.selected_bg_color
+                                color_style.scheme.row_selected_bg_color
                             } else {
                                 color_style.scheme.bg_color
                             };
@@ -2992,7 +2997,7 @@ fn run<T:FastLogLinesTrait>(
                             .enumerate()
                         {
                             let bgcolor = if Some(i) == selected {
-                                color_style.scheme.selected_bg_color
+                                color_style.scheme.row_selected_bg_color
                             } else {
                                 color_style.scheme.bg_color
                             };
@@ -3083,7 +3088,7 @@ fn run<T:FastLogLinesTrait>(
                         .map(|x| x.min(state.state_config.tracepoints.len().saturating_sub(1)));
                     for (i, tracepoint) in state.state_config.tracepoints.iter().enumerate() {
                         let bgcolor = if Some(i) == selected {
-                            color_style.scheme.selected_bg_color
+                            color_style.scheme.row_selected_bg_color
                         } else {
                             color_style.scheme.bg_color
                         };
