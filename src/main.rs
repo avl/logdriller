@@ -398,7 +398,18 @@ impl<T:FastLogLinesTrait> State<T> {
     }
     fn add_tracepoint(&mut self,
                       edited: Option<&Fingerprint>,
-                      mut tp: TracePointData) {
+                      mut tp: TracePointData) -> bool {
+        // Reject duplicate fingerprint expressions: the backing search engine only
+        // yields hits for the first match, so two identical expressions would be
+        // misleading.
+        let is_duplicate = self.state_config.tracepoints.iter().any(|x| {
+            x.fingerprint == tp.fingerprint &&
+            edited.map_or(true, |e| &x.fingerprint != e)
+        });
+        if is_duplicate {
+            return false;
+        }
+
         let any_active = self.state_config.tracepoints.iter().any(|x| x.active);
         if edited.is_none() {
             tp.tp.color_index = self.calculate_free_color_index();
@@ -413,10 +424,10 @@ impl<T:FastLogLinesTrait> State<T> {
             .find(|x| x.fingerprint == tp.fingerprint && x.tp.file == tp.tp.file)
         {
             if prev_tp.active && tp.active {
-                return;
+                return true;
             }
             if !prev_tp.active && !tp.active {
-                return;
+                return true;
             }
             prev_tp.active = tp.active;
             drop(tp);
@@ -437,6 +448,7 @@ impl<T:FastLogLinesTrait> State<T> {
         }
         self.rebuild_trie();
         self.rebuild_matches();
+        true
     }
 
     /// Returns the currently selected line as a stable [`LogLineId`].
@@ -2713,7 +2725,7 @@ fn run<T:FastLogLinesTrait>(
 
     enum GuiState {
         Normal,
-        AddNewFilter(TextArea<'static>,Option<Fingerprint>/*edited fingerprint*/),
+        AddNewFilter(TextArea<'static>, Option<Fingerprint>/*edited fingerprint*/, Option<String>/*error*/),
         Configure(ParsingConfigState, bool /*help*/),
         ShowHelp,
     }
@@ -2897,7 +2909,7 @@ fn run<T:FastLogLinesTrait>(
                     let mut fixed_output_table_state = output_table_state.clone();
                     *fixed_output_table_state.offset_mut() = 0;
                     if let Some(selected) = fixed_output_table_state.selected_mut() {
-                        *selected -= offset;
+                        *selected = selected.saturating_sub(offset);
                     }
                     let selected = fixed_output_table_state.selected();
                     let autosize = state.state_config.col_sizes.len() != state.all_lines.cols().len();
@@ -3103,10 +3115,25 @@ u     - Autosize columns             s    - Freeze (throw away further output)
                             render_help(frame, helptext, &color_style);
                             //this clears out the background
                         }
-                        GuiState::AddNewFilter(text, edited) => {
-                            let area = popup_area(frame.area(), 75, 3);
-                            frame.render_widget(Clear, area); //this clears out the background
-                            frame.render_widget(&*text, area);
+                        GuiState::AddNewFilter(text, _edited, error) => {
+                            if let Some(err) = error {
+                                let area = popup_area(frame.area(), 75, 5);
+                                frame.render_widget(Clear, area);
+                                let [text_area, err_area] = Layout::vertical([
+                                    Constraint::Length(3),
+                                    Constraint::Length(2),
+                                ]).areas(area);
+                                frame.render_widget(&*text, text_area);
+                                frame.render_widget(
+                                    Paragraph::new(err.as_str())
+                                        .style(Style::default().fg(Color::Red)),
+                                    err_area,
+                                );
+                            } else {
+                                let area = popup_area(frame.area(), 75, 3);
+                                frame.render_widget(Clear, area);
+                                frame.render_widget(&*text, area);
+                            }
                         }
                         GuiState::Configure(config_state, help) => {
                             match config_state {
@@ -3465,7 +3492,7 @@ Note! Column support requires that the underlying application output is in json 
                         KeyCode::Char('A') | KeyCode::Char('a') => {
                             let mut text = TextArea::default();
                             text.set_block(Block::new().borders(Borders::ALL).title("Filter"));
-                            gui_state = GuiState::AddNewFilter(text, None);
+                            gui_state = GuiState::AddNewFilter(text, None, None);
                         }
                         KeyCode::Char('E') | KeyCode::Char('e') => {
                             if let Some(sel) = filter_table_state.selected() {
@@ -3473,7 +3500,7 @@ Note! Column support requires that the underlying application output is in json 
                                     let mut text = TextArea::default();
                                     text.insert_str(tp.fingerprint.to_string());
                                     text.set_block(Block::new().borders(Borders::ALL).title("Filter"));
-                                    gui_state = GuiState::AddNewFilter(text, Some(tp.fingerprint.clone()));
+                                    gui_state = GuiState::AddNewFilter(text, Some(tp.fingerprint.clone()), None);
                                 }
 
                             }
@@ -3501,14 +3528,14 @@ Note! Column support requires that the underlying application output is in json 
                         },
                         _ => {}
                     },
-                    GuiState::AddNewFilter(text, edited) => match code {
+                    GuiState::AddNewFilter(text, edited, error) => match code {
                         KeyCode::Esc => {
                             gui_state = GuiState::Normal;
                         }
                         KeyCode::Enter => {
                             let fingerprint = text.lines()[0].to_string();
 
-                            state.add_tracepoint(edited.as_ref(),TracePointData {
+                            let ok = state.add_tracepoint(edited.as_ref(), TracePointData {
                                 fingerprint: Fingerprint::parse(&fingerprint),
                                 tp: TracePoint {
                                     file: Arc::new(Default::default()),
@@ -3522,8 +3549,12 @@ Note! Column support requires that the underlying application output is in json 
                                 matches: AtomicUsize::new(0),
                             });
 
-                            gui_state = GuiState::Normal;
-                            state.save();
+                            if ok {
+                                gui_state = GuiState::Normal;
+                                state.save();
+                            } else {
+                                *error = Some("Expression already exists".to_string());
+                            }
                         }
                         _ => {
                             text.input(event);
