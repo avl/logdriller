@@ -1,6 +1,6 @@
 [package]
 name = "logdriller"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 description = "Tool to visualize application log output in the terminal"
 license = "MIT"

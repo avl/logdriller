@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.1]
+ * Fix bug where scroll position was awkwardly far down after changing a filter
+ * Make it more visibly obvious whether the application has finished or is still running.
+ * Fix a bug where the 'O' button to got to next hit didn't always work. 
+
 ## [0.9.0]
 New features:
  * Solo mode. Disable all filters except one.
