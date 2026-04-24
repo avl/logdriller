@@ -211,6 +211,7 @@ fn check_matching<'a>(
     fingerprint_trie: &mut Trie<TracePoint>,
     trace_point_data: &[TracePointData],
     row: &AnalyzedRow<'a>,
+    positive_match_required: bool,
 ) -> bool {
     if fingerprint_trie.empty_trie() {
         return true;
@@ -238,7 +239,7 @@ fn check_matching<'a>(
             len,
         );
     }
-    any_positive_hit && !any_negative_hit
+    (!positive_match_required || any_positive_hit) && !any_negative_hit
 }
 
 
@@ -251,7 +252,8 @@ fn add_if_matching<'a>(
     row: &AnalyzedRow<'a>,
 ) {
     let id = row.id();
-    if check_matching(fingerprint_trie, trace_point_data, row) {
+    let has_positive = trace_point_data.iter().any(|tp| tp.active && !tp.negative);
+    if check_matching(fingerprint_trie, trace_point_data, row, has_positive) {
         matching_lines.push_back(id);
     }
 }
@@ -355,6 +357,7 @@ impl<T:FastLogLinesTrait> State<T> {
         }
 
         let rows = self.all_lines.iter().collect::<Vec<_>>();
+        let has_positive = self.state_config.tracepoints.iter().any(|tp| tp.active && !tp.negative);
 
         let mut matching_lines: Vec<LogLineId> = rows
             .into_par_iter()
@@ -362,7 +365,7 @@ impl<T:FastLogLinesTrait> State<T> {
                 || self.fingerprint_trie.clone(),
                 |trie, row| {
                     let id = row.id();
-                    if check_matching(trie, &self.state_config.tracepoints[..], &row) {
+                    if check_matching(trie, &self.state_config.tracepoints[..], &row, has_positive) {
                         id
                     } else {
                         LogLineId::MAX
@@ -586,12 +589,15 @@ fn do_add_line<T: FastLogLinesTrait>(
     state: &mut State<T>,
     line: Option<&str>
 ) -> bool {
+    let has_positive_capture_filter = state.state_config.tracepoints.iter()
+        .any(|tp| tp.capture && tp.active && !tp.negative);
     let mut ignored = false;
     if !state.all_lines.push(line, |analyzed| {
         if !check_matching(
             &mut state.capture_fingerprint_trie,
             &mut state.state_config.tracepoints,
             &analyzed,
+            has_positive_capture_filter,
         ) {
             ignored = true;
             return false;
@@ -2320,6 +2326,7 @@ fn inner_main<T:FastLogLinesTrait>(mut state: State<T>, state_config: StateConfi
     });
 
     let mut the_child = None;
+    let mut child_start = None;
 
     let (diver_events_tx1, diver_events_rx) = mpsc::sync_channel(4096);
     let (string_tx1, string_rx1) = mpsc::sync_channel(STRING_CARRIER_COUNT);
@@ -2420,6 +2427,7 @@ fn inner_main<T:FastLogLinesTrait>(mut state: State<T>, state_config: StateConfi
             });
         }
         let child = KillOnDrop(child);
+        let start_instant = Instant::now();
 
         if debug_capturer {
             std::thread::sleep(std::time::Duration::from_secs(86400));
@@ -2432,6 +2440,7 @@ fn inner_main<T:FastLogLinesTrait>(mut state: State<T>, state_config: StateConfi
             }
         }
         the_child = Some(child);
+        child_start = Some(start_instant);
     }
 
 
@@ -2441,6 +2450,7 @@ fn inner_main<T:FastLogLinesTrait>(mut state: State<T>, state_config: StateConfi
             terminal,
             state,
             the_child,
+            child_start,
             light_mode,
             diver_events_rx,
             string_senders,
@@ -2748,10 +2758,65 @@ impl LogField {
         }
     }
 }
+fn format_elapsed(start: Instant) -> String {
+    let secs = start.elapsed().as_secs();
+    let mins = secs / 60;
+    let secs = secs % 60;
+    if mins < 100 {
+        format!("{:02}:{:02}", mins, secs)
+    } else {
+        let hours = mins / 60;
+        let mins = mins % 60;
+        format!("{:02}:{:02}", hours, mins)
+    }
+}
+
+fn shimmer_key(label: &str, color_style: &ColorStyle) -> Line<'static> {
+    let text = format!("{}:", label);
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len() as f32;
+
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let period = n + 1.0;
+    let t = (ms % 1500) as f32 / 1500.0;
+    let shimmer_pos = t * period;
+
+    let (base_r, base_g, base_b) = match color_style.scheme.base_text_color {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        _ => (192.0, 192.0, 192.0),
+    };
+    let bg = color_style.scheme.bg_color;
+    let (gleam_r, gleam_g, gleam_b): (f32, f32, f32) = if color_style.scheme.light {
+        (220.0, 140.0, 0.0)
+    } else {
+        (255.0, 255.0, 255.0)
+    };
+
+    let spans: Vec<Span<'static>> = chars
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let raw_dist = (i as f32 - shimmer_pos).abs();
+            let dist = raw_dist.min(period - raw_dist); // wrapped distance
+            let factor = (-dist * dist / 2.88).exp(); // gaussian, sigma=1.2
+            let r = (base_r + (gleam_r - base_r) * factor).round() as u8;
+            let g = (base_g + (gleam_g - base_g) * factor).round() as u8;
+            let b = (base_b + (gleam_b - base_b) * factor).round() as u8;
+            Span::styled(c.to_string(), Style::new().fg(Color::Rgb(r, g, b)).bg(bg))
+        })
+        .collect();
+
+    Line::from(spans)
+}
+
 fn run<T:FastLogLinesTrait>(
     mut terminal: DefaultTerminal,
     mut state: State<T>,
     mut child: Option<KillOnDrop>,
+    child_start: Option<Instant>,
     mut light_mode: bool,
     mut program_lines: mpsc::Receiver<DiverEvent>,
     mut string_senders: [SyncSender<StringCarrier>; 2],
@@ -2777,12 +2842,15 @@ fn run<T:FastLogLinesTrait>(
     {
         filter_table_state.select(state.state_config.selected_filter);
         output_table_state.select(state.selected_output);
+        state.selected_output = output_table_state.selected();
+        state.state_config.selected_filter = filter_table_state.selected();
     }
 
     let mut row_space = 0;
     let mut do_center = false;
     let mut sleep_time = 50u64;
     let mut follow = false;
+    let mut last_anim_tick = Instant::now();
     loop {
         let change;
         {
@@ -2851,7 +2919,8 @@ fn run<T:FastLogLinesTrait>(
                         do_center = false;
                         offset = selected
                             .saturating_sub(row_space / 2)
-                            .min(matching_line_count.saturating_sub(1));
+                            .min(matching_line_count.saturating_sub(1))
+                            .min(matching_line_count.saturating_sub(row_space));
                         *output_table_state.offset_mut() = offset;
                         selected_opt = output_table_state.selected();
                     } else if follow && matching_line_count > row_space {
@@ -2859,6 +2928,7 @@ fn run<T:FastLogLinesTrait>(
                             matching_line_count.min(matching_line_count.saturating_sub(row_space));
                         *output_table_state.offset_mut() = offset;
                         output_table_state.select(Some(matching_line_count - 1));
+                        state.selected_output = Some(matching_line_count - 1);
                         selected_opt = output_table_state.selected();
                     } else {
                         if output_table_state.selected().unwrap_or(0) >= matching_line_count {
@@ -2879,9 +2949,12 @@ fn run<T:FastLogLinesTrait>(
                         }
                         offset = output_table_state
                             .offset()
-                            .min(matching_line_count.saturating_sub(1));
+                            .min(matching_line_count.saturating_sub(1))
+                            .min(matching_line_count.saturating_sub(row_space));
+                        *output_table_state.offset_mut() = offset;
                     }
 
+                    let mut process_running = false;
                     let stats = [
                         ("Total", state.total.to_string()),
                         ("Held", state.all_lines.len().to_string()),
@@ -2893,7 +2966,10 @@ fn run<T:FastLogLinesTrait>(
                                         None => "?".to_string(),
                                         Some(code) => code.to_string(),
                                     },
-                                    Ok(None) => "running".to_string(),
+                                    Ok(None) => {
+                                        process_running = true;
+                                        format_elapsed(child_start.unwrap())
+                                    },
                                     Err(err) => err.to_string(),
                                 }
                             } else {
@@ -2930,10 +3006,17 @@ fn run<T:FastLogLinesTrait>(
                         let mut value_area = cur_stat_area;
                         value_area.x = 9;
                         value_area.width = value_area.width.saturating_sub(9);
-                        frame.render_widget(
-                            Paragraph::new(format!("{}:", key)).style(color_style.default_style),
-                            key_area,
-                        );
+                        if key == "Status" && process_running {
+                            frame.render_widget(
+                                Paragraph::new(shimmer_key(key, &color_style)),
+                                key_area,
+                            );
+                        } else {
+                            frame.render_widget(
+                                Paragraph::new(format!("{}:", key)).style(color_style.default_style),
+                                key_area,
+                            );
+                        }
                         frame.render_widget(
                             Paragraph::new(val).style(color_style.default_style),
                             value_area,
@@ -3247,6 +3330,12 @@ Note! Column support requires that the underlying application output is in json 
             }
         }
 
+        let child_running = child.as_mut().map_or(false, |c| matches!(c.0.try_wait(), Ok(None)));
+        if child_running && last_anim_tick.elapsed() >= Duration::from_millis(250) {
+            state.generation += 1;
+            last_anim_tick = Instant::now();
+        }
+
         if change {
             sleep_time = 0;
         } else {
@@ -3474,6 +3563,7 @@ Note! Column support requires that the underlying application output is in json 
                                     }
                                     _ => {}
                                 }
+                                state.state_config.selected_filter = filter_table_state.selected();
                             }
                         }
 
