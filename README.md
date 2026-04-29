@@ -7,7 +7,7 @@ but it can be used with any application that writes to `stdout` or `stderr`.
 ![Screenshot of log driller in action](screenshot.png)
 
 It has a very special feature - adding automatic search expressions through your
-IDE. Once started, Log Driller watches your source folder (by default, the current
+IDE. Once started, using the --trace parameter, Log Driller watches your source folder (by default, the current
 directory, but you can override this using the `--source` parameter). Whenever
 a `//` is added to the end of a line, any string literal on that line is parsed
 and added as a search expression. Log Driller then filters the client application
