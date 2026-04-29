@@ -651,7 +651,7 @@ fn mainloop<T: FastLogLinesTrait>(
     const SLICE_MS: u64 = 50;
     let mut change = false;
     if !T::SUPPORT_ADD {
-        let mut any_added = false;
+
         let mut counter = 0;
         loop {
             let added = do_add_line(state, None);
@@ -697,6 +697,9 @@ fn mainloop<T: FastLogLinesTrait>(
                 state.add_tracepoint(None, tp);
                 state.save();
             }
+            DiverEvent::ProgramFinished => {
+                // change already marked true, that's the only side effect we need
+            }
             DiverEvent::ProgramOutput(mut lines, channel) => {
                 for line in lines.all() {
 
@@ -737,12 +740,10 @@ impl ReadManyLines {
         &mut self,
         read: &mut BufReader<T>,
         mut f: impl FnMut(&str) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut buf = read.fill_buf()?;
         if buf.len() == 0 {
-            // EOF.
-            // It's very unlikely/impossible that EOF stops being EOF, but let's retry periodically
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            return Ok(true);
         }
         let mut l = 0;
         let mut limit = 0;
@@ -759,7 +760,7 @@ impl ReadManyLines {
             limit += 1;
             if limit > 200 {
                 read.consume(l);
-                return Ok(());
+                return Ok(false);
             }
         }
         if !buf.is_empty() {
@@ -768,7 +769,7 @@ impl ReadManyLines {
         }
         read.consume(l);
 
-        Ok(())
+        Ok(false)
     }
 }
 const STRING_DEFAULT_CAP: usize = 200;
@@ -830,7 +831,7 @@ fn capturer(
     let mut string_magazine = None;
     loop {
         //let mut count = 0;
-        line_buf.read_many_lines(&mut child_out, |raw_line| {
+        let finished = line_buf.read_many_lines(&mut child_out, |raw_line| {
             {
                 if debug_capturer {
                     println!("Captured: {}", raw_line);
@@ -899,6 +900,13 @@ fn capturer(
                 Ok(())
             }
         })?;
+        if finished {
+            program_lines
+                .send(DiverEvent::ProgramFinished).unwrap();
+            // EOF.
+            // It's very unlikely/impossible that EOF stops being EOF, but let's retry periodically
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
 
         if let Some(magazine) = string_magazine.as_ref()
             && magazine.any()
@@ -925,6 +933,7 @@ struct TracePoint {
 pub enum DiverEvent {
     SourceChanged(TracePointData),
     ProgramOutput(StringCarrier, usize /*channel 0 or 1*/),
+    ProgramFinished,
 }
 
 
